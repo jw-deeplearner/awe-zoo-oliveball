@@ -1,0 +1,3 @@
+>> use cf_video_labeller to create label dictionaries for use with pytorch library
+        >> library_tree visualises data (easier to check for skew / imbalance)
+>> use cf_train_test to train / test models
