@@ -10,6 +10,7 @@ from bespoke_ai_training_tools import *
 from bespoke_video_tools import convert_seconds_to_timestamp
 from transformers import VideoMAEForVideoClassification
 from cfa_video_classifier import *
+from cf_transform import PeripheralEnvisionate
 
 def create_model(model_type: str, num_classes: int, device: torch.device):
     #Video classification model is implicit
@@ -59,9 +60,6 @@ def create_model(model_type: str, num_classes: int, device: torch.device):
     elif model_type == "VideoMAE-B-Kinetics":
         # Pretrained classifier head from HF (Kinetics-400 labels)
         model = VideoMAEForVideoClassification.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics", num_labels=num_classes, ignore_mismatched_sizes=True)
-
-    elif model_type == "InternVideo2-1B":
-        model = InternVideo2Classifier("OpenGVLab/InternVideo2-Stage2_1B-224p-f4", num_classes)
 
     else:
         raise ValueError("Mate, this model you're trying to create doesn't bloody exist!")
@@ -239,12 +237,12 @@ def get_model_transforms(model_type: str, use_original_transforms:bool,clip_leng
         VIDEOMAEV2_STD  = [0.229, 0.224, 0.225]
 
         train_transforms = transforms.Compose([
-            transforms.Resize((224,224)),                
+            PeripheralEnvisionate(output_size=(224,224), band_fractions=(0.2,0.6,0.2)),               
             transforms.RandomHorizontalFlip(p=0.5), 
             transforms.Normalize(mean=VIDEOMAEV2_MEAN, std=VIDEOMAEV2_STD),
         ])
         test_transforms = transforms.Compose([
-            transforms.Resize((224,224)),
+            PeripheralEnvisionate(output_size=(224,224), band_fractions=(0.2,0.6,0.2)),
             transforms.Normalize(mean=VIDEOMAEV2_MEAN, std=VIDEOMAEV2_STD),
         ])
         
@@ -344,6 +342,7 @@ def save_model_metadata(model_type: str, model_filename: str, fold_no: int, labe
     dataset_info: Dict[str, int],evaluation_results, stratified_kfold_object: StratifiedKFold,
     seconds_taken_to_create_model: int, video_backend: str,
     train_transforms = None, training_hyperparameters: Optional[Dict[str, Any]] = None,
+    per_epoch_metadata: Optional[Dict[str, Any]] = None,
     notes: Optional[str] = None, models_path: Optional[str | Path] = get_models_path()) -> Path:
     
     time_taken_to_create_model = convert_seconds_to_timestamp(seconds_taken_to_create_model)
@@ -359,7 +358,8 @@ def save_model_metadata(model_type: str, model_filename: str, fold_no: int, labe
     
     current_timestamp = get_current_time()
     metadata = {"model_type": model_type, "model_filename": model_filename, "fold_number": fold_no,"num_classes": len(labels_index),
-    "labels_index": labels_index, "dataset_sizes":dataset_info,"average_loss": avg_loss, "accuracy": accuracy,
+    "dataset_sizes":dataset_info,"weighted_average_f1" : classification_report_dict["weighted avg"]["f1-score"],
+    "average_loss": avg_loss, "accuracy": accuracy,"labels_index": labels_index,
     "classification_report": classification_report_dict, "stratified_kfold": stratified_kfold_config, 
     "time_taken_to_create_model":time_taken_to_create_model,"saved_at_roughly":current_timestamp,"video_backend":video_backend}
 
@@ -370,7 +370,7 @@ def save_model_metadata(model_type: str, model_filename: str, fold_no: int, labe
         metadata["train_transforms"] = extract_transforms_info(train_transforms)
 
     if training_hyperparameters is not None:
-        metadata["training_hyperparameters"] = training_hyperparameters
+        metadata["training_hyperparameters"] = training_hyperparameters 
 
     metadata["confusion_matrix"] = confusion_matrix_dict
 
@@ -383,9 +383,15 @@ def save_model_metadata(model_type: str, model_filename: str, fold_no: int, labe
     evaluation_metadata_filename = metadata_filename_stem + "_evaluation_metadata.json"
     evaluation_metadata_path = metadata_folder_path / evaluation_metadata_filename
 
+    per_epoch_metadata_filename = metadata_filename_stem + "_epoch_level_metadata.json"
+    per_epoch_metadata_path = metadata_folder_path / per_epoch_metadata_filename
+
     try:
         write_dict_to_json(metadata, metadata_path)
         write_dict_to_json(evaluation_metadata, evaluation_metadata_path)
+        if per_epoch_metadata is not None:                           
+            write_dict_to_json(per_epoch_metadata, per_epoch_metadata_path)
+
     except TypeError as e:
         print(e)
         print("Warning! Saving Model Metadata Failed.")

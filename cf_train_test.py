@@ -20,17 +20,18 @@ from cf_glance import *
 from cf_model import * 
 from cf_early_stop import CustomEarlyStopper
 from cf_assert import * 
-from cf_scheduler import create_scheduler
+from cf_scheduler import create_scheduler, create_cyclical_scheduler
 
 @time_a_function()
 def train_single_epoch(model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, optimizer: torch.optim.Optimizer, scheduler: torch.optim.lr_scheduler.LambdaLR,
-                       criterion, device: torch.device) -> None:
+                       criterion, device: torch.device, log_interval=10) -> None:
     model.train()
     running_loss = 0.0
     num_samples = 0
+    step_history = {"lr": [], "loss": [], "step": []}
 
     dataloader_avec_progress_bar = tqdm(dataloader, desc="Training", unit="batch",colour='cyan',dynamic_ncols=True)
-    for batch_frames, batch_labels, batch_metadata in dataloader_avec_progress_bar:
+    for step, (batch_frames, batch_labels, batch_metadata) in enumerate(dataloader_avec_progress_bar, 1):
         if batch_frames is None and batch_labels is None and batch_metadata is None:
             continue
 
@@ -49,18 +50,25 @@ def train_single_epoch(model: torch.nn.Module, dataloader: torch.utils.data.Data
         loss = criterion(outputs, batch_labels)
         loss.backward()
         optimizer.step()
-        scheduler.step()
         current_learning_rate = scheduler.get_last_lr()[0]
+        scheduler.step()
 
         batch_size = batch_frames.size(0)
         num_samples += batch_size
         running_loss += loss.item() * batch_size
         avg_loss = running_loss / num_samples
 
+        # log every N steps
+        if step_history is not None and step % log_interval == 0:
+            step_history["lr"].append(current_learning_rate)
+            step_history["loss"].append(avg_loss)
+            step_history["step"].append(step)
+
         dataloader_avec_progress_bar.set_postfix({"Batch Loss": f"{loss.item():.4f}","Average Loss": f"{avg_loss:.4f}", "Learning Rate":f"{current_learning_rate:.2e}"})
         #print(f"Batch loss: {loss.item():.4f} in interation {iteration} of {len(dataloader)}")
 
     print(f"Finished training epoch with train Loss: {avg_loss:.4f}")
+    return avg_loss, step_history
 
 @time_a_function()
 def evaluate(model, dataloader, criterion, device, labels_index):
@@ -120,8 +128,8 @@ if __name__ == '__main__':
 
     #supported_model_types = ["S3D","Swin3D_B_Kinetics_and_Imagenet22K","Swin3D_Tiny","MViTv2-S","ResnetR2+1D_R18","Swin3D_B_Kinetics"
     # ,"VideoMAEv2-L", "VideoMAEv2-B", "VideoMAEv2-H","VideoMAE-B-Kinetics"]
-    model_type = "VideoMAEv2-H" 
-    use_original_transforms = True
+    model_type = "VideoMAEv2-H"
+    use_original_transforms = False
     loss_type = 'weighted_cross_entropy'
 
     '''actual evaluation recipes (as documented on each weight card) for the current torchvision video models on Kinetics-400:
@@ -141,6 +149,13 @@ if __name__ == '__main__':
     labels_index = load_json(get_label_index_path())      # label -> int index
     assert_contiguous_labels_index(labels_index)
     
+    #different model sizes
+    big_boppa_models = ["VideoMAEv2-H"]
+    biggish_boppa_models = ['VideoMAEv2-L']
+    medium_boppa_models = ['VideoMAEv2-B','Swin3D_B_Kinetics_and_Imagenet22K','Swin3D_B_Kinetics','VideoMAE-B-Kinetics']
+    #CPU Worker prefetch
+    prefetch_factor = None
+
     # Prepare video paths and their labels for stratified splitting
     video_paths = list(labels_dict.keys())
     video_labels = [labels_dict[vp] for vp in video_paths]
@@ -148,7 +163,11 @@ if __name__ == '__main__':
     #YO THIS IS IMPORTANT!! 🍉🍉🍉🍉🍉🍉🍉🍉🍉🍉🍉🍉🍉🍉🍉
     #===============================
     k_fold_folds_no = 5
-    patience = 12
+    patience = 30
+    if model_type in big_boppa_models or biggish_boppa_models:
+        patience = 12
+    elif model_type in medium_boppa_models:
+        patience = 15
     #===============================
 
     # I love a bit of deterministic evaluation 🎲🎲🎲🎲🎲🎲🎲🎲🎲
@@ -170,9 +189,6 @@ if __name__ == '__main__':
 
     #🍉🍉 Device Capability Stuff 🍉🍉
     #===============================
-    big_boppa_models = ["VideoMAEv2-H"]
-    medium_boppa_models = ['VideoMAEv2-L']
-    prefetch_factor = None
 
     if platform.system() == "Linux":
         num_cpu_workers = 16
@@ -181,10 +197,13 @@ if __name__ == '__main__':
     else:
         num_cpu_workers = 4
     batch_size = 8
+    number_of_gif_batches = 1
     if model_type in big_boppa_models:
         batch_size = 2
-    if model_type in medium_boppa_models:
+        number_of_gif_batches = 4
+    if model_type in medium_boppa_models or model_type in biggish_boppa_models:
         batch_size = 3
+        number_of_gif_batches = 3
     #===============================
 
     classes_path = get_library_path() / "Classes"
@@ -192,6 +211,9 @@ if __name__ == '__main__':
     fold_no = 0
     for train_idx, val_idx in skf.split(video_paths, video_labels):
         fold_no += 1
+        if fold_no !=4:
+            print("[SKIP FOLD] you're loading fold 4 FYI")
+            continue
         
         print_divider()
         print(f"                        ❋ Fold {fold_no} ❋")
@@ -201,10 +223,25 @@ if __name__ == '__main__':
         val_videos = {video_paths[i]: video_labels[i] for i in val_idx}
 
         video_backend = 'pyav'
-        print("Creating Training Dataset...")
-        train_dataset = CustomVideoDataset(classes_path, train_videos, clip_length_in_frames=clip_length_in_frames, transforms=train_transforms,video_backend=video_backend)
-        print("Creating Testing Dataset...")
-        val_dataset = CustomVideoDataset(classes_path, val_videos, clip_length_in_frames=clip_length_in_frames, transforms=test_transforms,video_backend=video_backend)
+        try:
+            print("Creating Training Dataset...")
+            train_dataset = CustomVideoDataset(classes_path, train_videos, clip_length_in_frames=clip_length_in_frames, transforms=train_transforms,video_backend=video_backend)
+            print("Creating Testing Dataset...")
+            val_dataset = CustomVideoDataset(classes_path, val_videos, clip_length_in_frames=clip_length_in_frames, transforms=test_transforms,video_backend=video_backend)
+        except KeyboardInterrupt:
+            while True:
+                should_quit_input = input(f"[QUIT] You just quit out of Training fold {fold_no}. Exit program? [y/n]")
+                should_quit_input = should_quit_input.lower().strip()
+                if should_quit_input == 'y' or should_quit_input == 'yes':
+                    print(f"[EXIT] Exiting Model Training & Testing.")
+                    quit()
+                elif should_quit_input == 'n' or should_quit_input == 'no':
+                    print(f"[FOLD CANCELLED] Moving on to Next Fold...")
+                    break
+                else:
+                    print(f"[BAD INPUT] Invalid option {should_quit_input}, try a simple yes or no buddy.")
+            continue
+
         #🍉 SEE Training dataset TEST 🍉
         glance_dataset(train_dataset, get_glance_info_path(), "train_dataset_samples.json")
         glance_dataset(val_dataset, get_glance_info_path(), "test_dataset_samples.json")
@@ -214,7 +251,7 @@ if __name__ == '__main__':
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_cpu_workers, collate_fn=custom_collate)
 
         #🍉 SEE VIDEOS TEST 🍉
-        glance_gifs_from_dataloader(train_loader,1)
+        glance_gifs_from_dataloader(train_loader,number_of_gif_batches)
         
         print("Creating model...")
 
@@ -223,19 +260,22 @@ if __name__ == '__main__':
 
         #Set epoch start to 0 if you want to see blind testing (funny)
         epoch_start = 1
-        load_existing_model = False
+        load_existing_model = True
+
         test_model_first = False
         if load_existing_model:
-            existing_model_filename = "fold2_VideoMAEv2-H_model.pth"
+            existing_model_filename = "fold4_goated_VideoMAEv2-H_model.pth"
             model = load_model(model, model_type, existing_model_filename, device)
-            epoch_start = 6
-            test_model_first = True
+            epoch_start = 1
+            #test_model_first = True
             print(f"[CONTINUE] Model training resumed @epoch-{epoch_start} using model at location {existing_model_filename}")
 
         ##==========🧮 YOOOOO important variables  🧮==============##
-        number_of_epochs=100 #Inclusive because numbers
+        number_of_epochs=70 #Inclusive because numbers
         if model_type in big_boppa_models:
             peak_learning_rate = 7.375e-6
+        elif model_type in biggish_boppa_models:
+            peak_learning_rate = 1.375e-5
         elif model_type in medium_boppa_models:
             peak_learning_rate = 4.375e-5
         else:
@@ -249,8 +289,19 @@ if __name__ == '__main__':
         number_of_total_steps = steps_per_epoch * number_of_epochs  # planned max, even if you stop early
         number_of_warm_up_steps = int(len(train_loader) * warm_up_epochs)  # fixed 2-epoch warmup
         decay_type = 'cosine'
+        cyclical_scheduler = True
+        if model_type in big_boppa_models:
+            number_of_epochs_per_re_warm_up_cycle = 6
+        elif model_type == 'MViTv2-S' or model in medium_boppa_models:
+            number_of_epochs_per_re_warm_up_cycle = 9
+        else:
+            number_of_epochs_per_re_warm_up_cycle = 12
 
+        ##==========🕖 Scheduler Type!! Can do the cycle thing make sure you set the correct one  🕖==============##
         scheduler = create_scheduler(optimizer, number_of_warm_up_steps, number_of_total_steps,decay_type)
+        #CYCLICAL VERSION
+        if cyclical_scheduler:
+            scheduler = create_cyclical_scheduler(optimizer, number_of_warm_up_steps, number_of_total_steps, decay_type, steps_per_epoch, number_of_epochs_per_re_warm_up_cycle)
 
         criterion = torch.nn.CrossEntropyLoss()
         if loss_type == 'weighted_cross_entropy':
@@ -281,6 +332,8 @@ if __name__ == '__main__':
         # ---
         model_filename_to_save = f"fold{fold_no}_{model_type}_model.pth"
 
+        #Full per-epoch metadata 
+        per_epoch_metadata = {}
         train_test_start_time = time.time()
         try:
             #Epoch 0 no fine-tune
@@ -288,9 +341,10 @@ if __name__ == '__main__':
                 if epoch == 0 or test_model_first:
                     print("Model Initialised — evaluating initial performance without fine-tuning")
                     test_model_first = False
+                    epoch_average_training_loss, epoch_training_step_history = None, None
                 else:
                     print(f"Currently training Epoch No. {epoch} of {number_of_epochs} in Fold {fold_no} of {k_fold_folds_no}")
-                    train_single_epoch(model, train_loader, optimizer, scheduler, criterion, device)
+                    epoch_average_training_loss, epoch_training_step_history = train_single_epoch(model, train_loader, optimizer, scheduler, criterion, device)
                     print(f"Evaluating performance of Epoch No. {epoch}")
                 per_epoch_evaluation_results = evaluate(model, val_loader, criterion, device,labels_index)
 
@@ -317,6 +371,15 @@ if __name__ == '__main__':
                 if epoch_other_metric_result == other_early_stopper.best:
                     best_other_metric_epoch = epoch
 
+                #per epoch metadata
+                current_learning_rate = scheduler.get_last_lr()[0]
+                per_epoch_metadata[epoch] = {
+                    "average_loss": epoch_average_loss,
+                    "weighted_f1_score": epoch_weighted_f1,
+                    "current_learning_rate" : current_learning_rate,
+                    "average_training_loss":epoch_average_training_loss,
+                    "training_history" : epoch_training_step_history
+                }
                 if should_stop_training:
                     print(f"[EARLY STOP] Training stopped during epoch No. {epoch}. Model saved from iteration {best_epoch}.")
                     model.load_state_dict(best_model)
@@ -363,6 +426,7 @@ if __name__ == '__main__':
         metadata_path = save_model_metadata(model_type=model_type,model_filename=model_filename_to_save,fold_no=fold_no,labels_index=labels_index, dataset_info = dataset_info,
                                             evaluation_results = fold_evaluation_result, stratified_kfold_object=skf, seconds_taken_to_create_model=total_train_test_time,
                                             video_backend=video_backend,train_transforms=train_transforms,training_hyperparameters=training_hyperparameters,
+                                            per_epoch_metadata = per_epoch_metadata,
                                             notes=f"Torchvision {model_type} Video Classifier Pre-Trained on Kinetics-400 Dataset & Fine-tuned using custom AFL Dataset")
 
         print(f"Saved model for fold {fold_no} at {model_saved_path}")
