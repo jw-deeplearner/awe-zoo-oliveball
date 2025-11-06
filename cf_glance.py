@@ -17,18 +17,17 @@ def glance_dataset(dataset, glance_info_path: str | Path, filename: str | Path):
         "filename",
         "total_frames"
     ]
-    # Convert tuples to dicts
+
     samples = [dict(zip(sample_keys, sample)) for sample in dataset.samples]
     print(f"Samples saved to file {glance_info_path}/{filename}!")
     write_dict_to_json(samples, glance_info_path / filename,print_message=False)
 
 @time_a_function()
-def glance_gifs_from_dataloader(dataloader,number_of_gif_batches):
+def glance_gifs_from_dataloader(dataloader,number_of_gif_batches,labels_index = load_json(get_label_index_path()),output_directory = get_example_gifs_path()):
     
-    labels_index = load_json(get_label_index_path())
     mean, std = get_normalize_mean_std(dataloader.dataset) 
     iterator_dataloader = iter(dataloader)
-    output_directory = get_example_gifs_path()
+
     Path.mkdir(output_directory,exist_ok=True)
     clear_directory_shallow(output_directory)
     for i in range(number_of_gif_batches):
