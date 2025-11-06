@@ -1,9 +1,40 @@
-## cf = classification
-## Creates video labels for use with torchvision from the already classified video in folder 
 from pathlib import Path
 from path_configurator import * 
 from bespoke_video_tools import *
-from collections import Counter
+from collections import Counter, defaultdict
+import random
+
+def reduce_label_dictionary(label_dictionary: dict, maximum_videos_per_class: int = 24, random_seed: int = 69) -> dict:
+    """
+    Reduce label_dictionary so that each class has at most `maximum_videos_per_class` samples.
+    Useful for quick testing/debugging.
+    
+    Args:
+        label_dictionary (dict): mapping from video_path -> class_index
+        maximum_videos_per_class (int): maximum number of videos to keep per class
+        random_seed (int): random seed for reproducibility
+    
+    Returns:
+        dict: reduced label_dictionary with balanced sampling
+    """
+    random.seed(random_seed)
+
+    # Group videos by class
+    class_to_video_paths = defaultdict(list)
+    for video_path, class_index in label_dictionary.items():
+        class_to_video_paths[class_index].append(video_path)
+
+    # Sample within each class
+    reduced_label_dictionary = {}
+    for class_index, video_paths in class_to_video_paths.items():
+        if len(video_paths) > maximum_videos_per_class:
+            sampled_video_paths = random.sample(video_paths, maximum_videos_per_class)
+        else:
+            sampled_video_paths = video_paths
+        for video_path in sampled_video_paths:
+            reduced_label_dictionary[video_path] = class_index
+
+    return reduced_label_dictionary
 
 def filter_for_minimum_video_count(minimum_number_of_videos: int, label_dictionary, class_map):
     '''ChatGPT Written but fixed up by me'''
@@ -146,8 +177,147 @@ def create_focused_label_dictionary(classes_folder_path: Path, option="broad",al
                     label_dictionary[str(rel_path)] = class_map['Kicks']
                 elif class_name == 'Behinds' or class_name == 'Goals':
                     label_dictionary[str(rel_path)] = class_map['Scores']
-                # elif rel_path.parent.name == 'Handball Receive':
-                #     label_dictionary[str(rel_path)] = class_map['Handball Receive']
+                #Shots which go out on the full are virtually indistinguishable
+                elif class_name == 'Out of Bounds' and rel_path.parent.name == 'Set Shot Drop Punt':
+                    continue
+
+                else:
+                    label_dictionary[str(rel_path)] = index
+
+    label_dictionary, class_map = filter_for_minimum_video_count(minimum_number_of_videos, label_dictionary, class_map)
+    return label_dictionary, class_map 
+
+
+def create_expanded_label_dictionary(classes_folder_path: Path, option="broad",allow_duplicates=False,verbose=False,minimum_number_of_videos=0,classes_to_remove=[],classes_to_remove_fully=[]):
+    label_dictionary = {}
+    # class_map = {"Scores":0}
+    class_map = {"Scores":0, "Handball Receive":1, "Taps":2}
+    if option not in ['broad','specific']:
+        raise ValueError("Mate you bloody didn't put in the right args")
+    
+    broad_classes = sorted([file for file in classes_folder_path.iterdir() if file.is_dir()])
+    specific_classes = sorted([file for file in classes_folder_path.rglob('*') if file.is_dir() and file not in broad_classes])
+
+    if option=='broad':
+        classes = broad_classes
+        #Remove unwanted classes
+        classes = [class_path for class_path in classes if class_path.name not in classes_to_remove]
+    elif option == 'specific':
+        classes = specific_classes
+        #Remove unwanted classes
+        classes = [class_path for class_path in classes if class_path.parent.name not in classes_to_remove]
+    
+    observed_video_set = set()
+    filenamefinder_dictionary = {}
+    for class_path in classes:
+        class_name = class_path.name
+        if option=='specific':
+            class_name = str(class_path.parent.name) + ' - ' + class_name
+        index = max(class_map.values(),default=-1) + 1
+        if class_name not in classes_to_remove_fully and class_name != 'Shots' and class_name != 'Behinds' and class_name != "Goals" and class_name != 'Fights':
+            class_map[class_name] = index
+
+        for potential_video_file in class_path.rglob('*'):
+            if check_file_is_video(potential_video_file):
+                if allow_duplicates == False:
+                    if potential_video_file.name in observed_video_set:
+                        if verbose:
+                            print("DUPLICATE: ",potential_video_file)
+                        try:
+                            rel_path_to_pop = filenamefinder_dictionary[potential_video_file.name]
+                            label_dictionary.pop(rel_path_to_pop)
+                        except KeyError:
+                            if verbose:
+                                print("KeyError: Probs already popped")
+                        continue
+                rel_path = potential_video_file.relative_to(classes_folder_path)
+
+                observed_video_set.add(potential_video_file.name)
+                filenamefinder_dictionary[potential_video_file.name] = str(rel_path)
+
+                #Remove all instances of videos found in class folder (putting in classes to remove will preserve duplicates in other classes as e.g. 'Replays' folders goes unseen)
+                if class_name in classes_to_remove_fully:
+                    continue
+                
+                if class_name == 'Shots':
+                    label_dictionary[str(rel_path)] = class_map['Kicks']
+                elif class_name == 'Behinds' or class_name == 'Goals':
+                    label_dictionary[str(rel_path)] = class_map['Scores']
+                elif class_name == 'Pick Ups' and ('Handball Receive' in rel_path.parent.name or rel_path.parent.name == 'Direct Pass'):
+                    label_dictionary[str(rel_path)] = class_map['Handball Receive']
+                #Shots which go out on the full are virtually indistinguishable
+                elif class_name == 'Out of Bounds' and rel_path.parent.name == 'Set Shot Drop Punt':
+                    continue
+                elif (class_name == 'Ground Contests' or class_name == 'Aerial Contests') and ('Tap' in rel_path.parent.name or 'Knock On' in rel_path.parent.name):
+                    label_dictionary[str(rel_path)] = class_map['Taps']
+                elif class_name == 'Fights':
+                    label_dictionary[str(rel_path)] = class_map['Establishing Shots']
+                else:
+                    label_dictionary[str(rel_path)] = index
+
+    label_dictionary, class_map = filter_for_minimum_video_count(minimum_number_of_videos, label_dictionary, class_map)
+    return label_dictionary, class_map 
+
+def create_tight_label_dictionary(classes_folder_path: Path, option="broad",allow_duplicates=False,verbose=False,minimum_number_of_videos=0,classes_to_remove=[],classes_to_remove_fully=[]):
+    label_dictionary = {}
+    class_map = {"Scores":0}
+    if option not in ['broad','specific']:
+        raise ValueError("Mate you bloody didn't put in the right args")
+    
+    broad_classes = sorted([file for file in classes_folder_path.iterdir() if file.is_dir()])
+    specific_classes = sorted([file for file in classes_folder_path.rglob('*') if file.is_dir() and file not in broad_classes])
+
+    if option=='broad':
+        classes = broad_classes
+        #Remove unwanted classes
+        classes = [class_path for class_path in classes if class_path.name not in classes_to_remove]
+    elif option == 'specific':
+        classes = specific_classes
+        #Remove unwanted classes
+        classes = [class_path for class_path in classes if class_path.parent.name not in classes_to_remove]
+    
+    observed_video_set = set()
+    filenamefinder_dictionary = {}
+    for class_path in classes:
+        class_name = class_path.name
+        if option=='specific':
+            class_name = str(class_path.parent.name) + ' - ' + class_name
+        index = max(class_map.values(),default=-1) + 1
+        if class_name not in classes_to_remove_fully and class_name != 'Shots' and class_name != 'Behinds' and class_name != "Goals":
+            class_map[class_name] = index
+
+        for potential_video_file in class_path.rglob('*'):
+            if check_file_is_video(potential_video_file):
+                if allow_duplicates == False:
+                    if potential_video_file.name in observed_video_set:
+                        if verbose:
+                            print("DUPLICATE: ",potential_video_file)
+                        try:
+                            rel_path_to_pop = filenamefinder_dictionary[potential_video_file.name]
+                            label_dictionary.pop(rel_path_to_pop)
+                        except KeyError:
+                            if verbose:
+                                print("KeyError: Probs already popped")
+                        continue
+                rel_path = potential_video_file.relative_to(classes_folder_path)
+
+                observed_video_set.add(potential_video_file.name)
+                filenamefinder_dictionary[potential_video_file.name] = str(rel_path)
+
+                #Remove all instances of videos found in class folder (putting in classes to remove will preserve duplicates in other classes as e.g. 'Replays' folders goes unseen)
+                if class_name in classes_to_remove_fully:
+                    continue
+                
+                if class_name == 'Shots':
+                    label_dictionary[str(rel_path)] = class_map['Kicks']
+                elif class_name == 'Behinds' or class_name == 'Goals':
+                    label_dictionary[str(rel_path)] = class_map['Scores']
+                #Skip Taps, need its own category
+                elif (class_name == 'Ground Contests' or class_name == 'Aerial Contests') and ('Tap' in rel_path.parent.name or 'Knock On' in rel_path.parent.name):
+                    continue
+                #Shots which go out on the full are virtually indistinguishable
+                elif class_name == 'Out of Bounds' and rel_path.parent.name == 'Set Shot Drop Punt':
+                    continue
 
                 else:
                     label_dictionary[str(rel_path)] = index
@@ -214,9 +384,18 @@ def create_other_paper_label_dictionary(classes_folder_path: Path, option="broad
 
 
 if __name__ == '__main__':
-    label_dict, label_index = create_label_dictionary(get_classes_path(),classes_to_remove=['Fights','Free Kicks'],classes_to_remove_fully=['Replays'])
-    label_dict, label_index = create_focused_label_dictionary(get_classes_path(),classes_to_remove=['Fights','Free Kicks','Out of Bounds'],classes_to_remove_fully=['Replays'])
+    #BASIC DATASETS
+    #label_dict, label_index = create_label_dictionary(get_classes_path(),classes_to_remove=['Fights','Free Kicks'],classes_to_remove_fully=['Replays'])
+    #label_dict, label_index = create_focused_label_dictionary(get_classes_path(),classes_to_remove=['Fights','Free Kicks','Out of Bounds'],classes_to_remove_fully=['Replays'])
+    #======================================
+    #FINAL DATASET - 15 CLASSES REFINED WITH TAPS REMOVED AND NO RUNNING TOWARDS BALL IN DISPUTE
+    label_dict, label_index = create_tight_label_dictionary(get_classes_path(),classes_to_remove=['Fights','Free Kicks','Out of Bounds','Running Towards Ball in Dispute'],classes_to_remove_fully=['Replays'])
 
+    #EXPANDED DATASET - 18 CLASSES ADDS EXTRA CLASSES AND INCORPORATES REPLAY FOOTAGE
+    # label_dict, label_index = create_expanded_label_dictionary(get_classes_path(),classes_to_remove=['Free Kicks','Replays'],classes_to_remove_fully=[])
+    #======================================
+    #REDUCE DATASET SIZE FOR TESTING
+    #label_dict = reduce_label_dictionary(label_dict)
     #KICKS ONLY SPECIFIC 
     #label_dict, label_index = create_label_dictionary(get_classes_path(),option='specific',minimum_number_of_videos=5,classes_to_remove=["Goal Umpire Signal","Goals","Ground Contests","Hit Outs","Line Ups","Out of Bounds","Pick Ups","Running","Shots","Splashscreens","Stoppages","Tackles",'Fights','Replays','Free Kicks','Aerial Contests','Behinds','Replays','Marks','Handballs','Establishing Shots'])
     #For comparing to other AFL paper, reduces data quality / breadth
