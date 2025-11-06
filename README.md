@@ -11,6 +11,11 @@ This thesis presents a detailed review of the current literature’s available t
 ## Dataset
 
 The **JezzaFooty-6-7** dataset is publicly available on Kaggle:
+
+
+
+
+
 🔗 [https://www.kaggle.com/datasets/jerrydeeplearner/jezzafooty-6-7/data](https://www.kaggle.com/datasets/jerrydeeplearner/jezzafooty-6-7/data)
 
 It comprises multi-class broadcast AFL clips, manually annotated and partitioned for reproducible deep-learning experimentation.
