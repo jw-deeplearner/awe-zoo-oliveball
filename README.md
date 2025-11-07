@@ -75,7 +75,7 @@ Inference is run by sequentially applying three temporal input streams (stride =
 
 **Women’s League:**
 
-* [AFLW Example - GWS v Sydney Highlights]
+* [AFLW Example - GWS v Sydney R6 2025 Snippet](https://youtu.be/dIJ8Ud1ivkY)
 
 **Non-Professional:**
 
